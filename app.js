@@ -717,8 +717,46 @@ VIEWS.home = () => {
   ${homeInbox()}`;
 };
 
-function briefingIsFresh() { return false; } // milestone 6
-function homeBriefing() { return ''; } // milestone 6
+// ---------------------------------------------------------------------------
+// Morning briefing (written by /api/cron/briefing; the page only reads it)
+// ---------------------------------------------------------------------------
+const SEEN_KEY = 'daybook:briefing-seen';
+const briefingKey = (b) => (b ? `${b.id}:${b.generated_at}` : '');
+function briefingIsFresh() {
+  const b = state.briefing;
+  if (!b || b.briefing_date !== today()) return false;
+  try { return localStorage.getItem(SEEN_KEY) !== briefingKey(b); } catch { return false; }
+}
+function markBriefingSeen() {
+  try { localStorage.setItem(SEEN_KEY, briefingKey(state.briefing)); } catch { /* ignore */ }
+}
+
+function homeBriefing() {
+  const b = state.briefing;
+  const head = (caption, chip = '') => `<div class="briefing-head">
+      <span class="briefing-badge">${icon('sparkle', 'sm')}</span>
+      <div><h2 style="margin:0;font-size:17px">Morning briefing</h2><div class="caption">${esc(caption)}</div></div>
+      ${chip}
+    </div>`;
+  if (!b) {
+    return `<section class="card briefing" id="briefing">${head('Not generated yet')}
+      <p class="caption" style="margin:0">The first one arrives tomorrow morning. You can also generate one now from Profile.</p></section>`;
+  }
+  const isToday = b.briefing_date === today();
+  const sections = splitSections(b.body_md);
+  const open = state.ui.briefingOpen || sections.length <= 1;
+  const first = sections[0];
+  const md = open ? b.body_md : `${first.title ? `## ${first.title}\n` : ''}${first.body}`;
+  const when = b.generated_at ? fmtInstant(new Date(b.generated_at), TZ) : '';
+  const caption = `${isToday ? `Generated ${when}` : `From ${fmtDate(b.briefing_date, { weekday: true })}`}${b.stats?.source === 'fallback' ? ' · basic summary' : ''}`;
+  const shape = ['heavy', 'normal', 'open'].includes(b.day_shape)
+    ? `<span class="chip ${b.day_shape} shape-chip">${{ heavy: 'Full day', normal: 'Steady day', open: 'Open day' }[b.day_shape]}</span>` : '';
+  return `<section class="card briefing" id="briefing">
+    ${head(caption, shape)}
+    <div class="md">${renderMarkdown(md)}</div>
+    ${sections.length > 1 ? `<button class="link-btn" data-action="toggle-briefing" aria-expanded="${open}" style="margin-top:6px">${open ? 'Show less' : 'Read briefing'}</button>` : ''}
+  </section>`;
+}
 
 // ---------------------------------------------------------------------------
 // Task detail
@@ -854,7 +892,30 @@ VIEWS.profile = () => `${header({ title: 'Profile' })}
   ${profileInstall()}
   <p class="caption" style="text-align:center;margin-top:20px">Daybook · ${readQueue().length ? `${readQueue().length} change(s) waiting to sync` : 'all changes synced'}</p>`;
 
-function profileBriefing() { return ''; } // milestone 6
+function profileBriefing() {
+  const b = state.briefing;
+  return `<section class="card">
+    <div class="card-title"><h2>Briefing</h2>${b?.stats?.source === 'fallback' ? '<span class="chip normal">Basic</span>' : ''}</div>
+    <div class="settings-row"><span class="k">Last generated</span><span class="v">${b?.generated_at ? `${esc(fmtDate(isoDateInTz(new Date(b.generated_at), TZ), { weekday: true }))} · ${esc(fmtInstant(new Date(b.generated_at), TZ))}` : 'Never'}</span></div>
+    <p class="caption" style="margin:4px 0 12px">Written every morning at 6:30 AM Eastern (5:30 AM in winter, because Vercel cron runs on UTC). It reads today’s calendar, inbox, tasks and pinned notes.</p>
+    <button class="btn dark block" data-action="regenerate">${icon('refresh', 'sm')} Regenerate now</button>
+  </section>`;
+}
+
+async function regenerateBriefing(el) {
+  if (DEMO) { toast('Demo mode: briefing is simulated.'); return; }
+  if (!navigator.onLine) { toast('Regenerating needs a connection.', { error: true }); return; }
+  el.disabled = true; el.innerHTML = `${icon('refresh', 'sm')} Writing…`;
+  try {
+    const res = await fetchApi('/api/cron/briefing', { method: 'POST' });
+    if (res.briefing) state.briefing = res.briefing;
+    saveCache();
+    toast(res.source === 'claude' ? 'Fresh briefing ready.' : 'Claude was unavailable — wrote a basic summary instead.', { error: res.source !== 'claude' });
+  } catch (err) {
+    toast(`Couldn’t regenerate: ${err.message}`, { error: true });
+  }
+  render();
+}
 function profileInstall() { return ''; } // milestone 7
 
 // ---------------------------------------------------------------------------
@@ -1894,7 +1955,18 @@ const ACTIONS = {
   'open-month': () => openMonthPicker(),
   'month-nav': (el) => { const body = $('#month-body'); if (body) body.innerHTML = monthGrid(el.dataset.value); },
   'pick-day': (el) => { state.ui.selectedDate = el.dataset.value; closeSheet(); if (parseRoute().view !== 'calendar') go('#calendar'); else render(); },
-  'show-briefing': () => {}, // milestone 6
+  'show-briefing': () => {
+    state.ui.briefingOpen = true;
+    markBriefingSeen();
+    render();
+    $('#briefing')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  },
+  'toggle-briefing': () => {
+    state.ui.briefingOpen = !state.ui.briefingOpen;
+    if (state.ui.briefingOpen) markBriefingSeen();
+    render();
+  },
+  regenerate: (el) => regenerateBriefing(el),
 };
 
 document.addEventListener('click', (e) => {
@@ -2096,6 +2168,12 @@ function seedDemo() {
   ];
   state.googleConnected = true;
   state.googleEmail = 'demo@gmail.com';
+  state.briefing = {
+    id: 'demo', briefing_date: d, generated_at: new Date(startOfDayInTz(d, TZ).getTime() + 392 * 60000).toISOString(),
+    headline: 'The Hollis estimate is the one thing that can’t slide today',
+    day_shape: 'normal', stats: { source: 'claude' },
+    body_md: '## Needs you\n- **Hollis estimate** goes out by 10 — Dana asked about the gauge an hour ago.\n- Truck registration slipped past yesterday.\n\n## Already sorted\n- DuctLink pricing page reviewed.\n\n## Shape of the day\n- **Morning** — Standup, then the site walk at 11.\n- **Afternoon** — Design review at 3:30; the rest is yours.\n- **Evening** — Dinner with family at 6:30.',
+  };
 }
 
 boot();

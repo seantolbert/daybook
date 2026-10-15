@@ -3,12 +3,15 @@
   "private": true,
   "type": "module",
   "description": "Personal life-dashboard PWA. Static frontend, Vercel functions in /api.",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "vercel dev",
-    "test": "node --test test/"
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "0.131.0",
     "@supabase/supabase-js": "2.117.2"
   }
 }
