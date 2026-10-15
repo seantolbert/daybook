@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Daybook</title>
+  <meta name="description" content="Daybook — calendar, inbox, tasks, notes and a morning briefing in one place.">
+  <meta name="theme-color" content="#F6EEF2">
+  <meta name="color-scheme" content="light">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Daybook">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="/styles.css">
+
+  <!--
+    Public config. Paste your Supabase project URL and anon/publishable key here (README step 2.7).
+    These two values are safe to ship to the browser; RLS protects the data. Nothing else goes here.
+  -->
+  <script type="application/json" id="daybook-config">
+  {
+    "supabaseUrl": "https://YOUR-PROJECT.supabase.co",
+    "supabaseAnonKey": "YOUR-ANON-OR-PUBLISHABLE-KEY",
+    "ownerName": "Sean",
+    "timeZone": "America/New_York"
+  }
+  </script>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.min.js"></script>
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <div class="bg" aria-hidden="true"></div>
+  <div id="app" class="app">
+    <main id="view" class="view" tabindex="-1">
+      <div class="boot"><div class="boot-dot"></div></div>
+    </main>
+    <nav id="nav" class="nav" aria-label="Primary" hidden></nav>
+  </div>
+  <div id="sheet-root"></div>
+  <div id="toast-root" aria-live="polite"></div>
+  <noscript><p class="noscript">Daybook needs JavaScript.</p></noscript>
+</body>
+</html>
