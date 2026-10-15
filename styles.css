@@ -150,7 +150,7 @@ img, svg { display: block; }
 .card-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
 .card-title h2, .section-title h2 { font-size: 17px; font-weight: 650; margin: 0; }
 .caption { font-size: var(--fs-caption); color: var(--muted); }
-.link-btn { font-size: var(--fs-caption); font-weight: 600; color: var(--lav-ink); padding: 6px 2px; }
+.link-btn { font-size: var(--fs-caption); font-weight: 600; color: var(--lav-ink); padding: 6px 2px; text-decoration: none; }
 .section-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 26px 0 12px; }
 .section-title:first-child { margin-top: 4px; }
 
@@ -561,3 +561,8 @@ input::-webkit-date-and-time-value { text-align: left; }
   .progress-ring { width: 96px; height: 96px; }
   .nav a.active { flex-grow: 2.6; }
 }
+
+/* Anytime group has no time labels: tighten the rail gutter */
+.tl-group.anytime .tl-items { padding-left: 28px; }
+.tl-group.anytime .tl-items::before { left: 16px; }
+.tl-card .foot { flex-wrap: wrap; }

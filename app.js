@@ -327,8 +327,9 @@ function saveCache() {
       v: 1,
       user: { id: state.user.id, email: state.user.email },
       projects: state.projects, tasks: state.tasks, notes: state.notes, files: state.files,
-      briefing: state.briefing, events: state.events, threads: state.threads,
-      googleConnected: state.googleConnected, googleEmail: state.googleEmail,
+      briefing: state.briefing, threads: state.threads,
+      events: state.events.filter((e) => String(e.end || e.start) >= addDays(today(), -7) && String(e.start) <= addDays(today(), 21)),
+      googleConnected: state.googleConnected, googleEmail: state.googleEmail, googleScopes: state.googleScopes,
       savedAt: Date.now(),
     }));
   } catch { /* quota or private mode — the app still works, just without the instant offline paint */ }
@@ -344,7 +345,7 @@ function loadCache() {
 }
 
 function applyCache(c) {
-  for (const k of [...TABLES, 'briefing', 'events', 'threads', 'googleConnected', 'googleEmail']) {
+  for (const k of [...TABLES, 'briefing', 'events', 'threads', 'googleConnected', 'googleEmail', 'googleScopes']) {
     if (c[k] !== undefined) state[k] = c[k];
   }
 }
@@ -565,8 +566,6 @@ function scheduleRender() {
 }
 viewEl.addEventListener('focusout', () => { if (renderDeferred) { renderDeferred = false; setTimeout(scheduleRender, 0); } });
 
-// Google + API (filled in by milestone 5)
-async function loadGoogle() { /* milestone 5 */ }
 
 // ---------------------------------------------------------------------------
 // Derived data
@@ -720,8 +719,6 @@ VIEWS.home = () => {
 
 function briefingIsFresh() { return false; } // milestone 6
 function homeBriefing() { return ''; } // milestone 6
-function homeUpNext() { return ''; } // milestone 5
-function homeInbox() { return ''; } // milestone 5
 
 // ---------------------------------------------------------------------------
 // Task detail
@@ -842,7 +839,6 @@ VIEWS.project = ({ id }) => {
   ${body}`;
 };
 
-VIEWS.calendar = () => header({ title: 'Calendar' }) + '<div class="card empty">Your calendar will appear here.</div>';
 
 // ---------------------------------------------------------------------------
 // Profile
@@ -858,7 +854,6 @@ VIEWS.profile = () => `${header({ title: 'Profile' })}
   ${profileInstall()}
   <p class="caption" style="text-align:center;margin-top:20px">Daybook · ${readQueue().length ? `${readQueue().length} change(s) waiting to sync` : 'all changes synced'}</p>`;
 
-function profileGoogle() { return ''; } // milestone 5
 function profileBriefing() { return ''; } // milestone 6
 function profileInstall() { return ''; } // milestone 7
 
@@ -1470,6 +1465,345 @@ document.addEventListener('input', (e) => {
 });
 
 // ---------------------------------------------------------------------------
+// API + Google (server holds every Google token; the browser only sees results)
+// ---------------------------------------------------------------------------
+async function fetchApi(path, { method = 'GET', body } = {}) {
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) throw new Error('Not signed in');
+  const res = await fetch(path, {
+    method,
+    headers: { authorization: `Bearer ${session.access_token}`, ...(body ? { 'content-type': 'application/json' } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const e = new Error(data.error || `Request failed (${res.status})`);
+    e.status = res.status;
+    throw e;
+  }
+  return data;
+}
+
+const loadedRanges = new Set();
+
+function markDisconnected(reconnect = false) {
+  state.googleConnected = false;
+  state.googleReconnect = reconnect;
+  state.events = [];
+  state.threads = [];
+  loadedRanges.clear();
+}
+
+async function loadEvents(start, end) {
+  const data = await fetchApi(`/api/google/calendar?start=${start}&end=${end}`);
+  if (data.connected === false) { markDisconnected(!!data.reconnect); return; }
+  const s = startOfDayInTz(start, TZ); const e = startOfDayInTz(end, TZ);
+  // replace anything we had in this window with the fresh set
+  state.events = state.events.filter((ev) => !(evStart(ev) < e && evEnd(ev) > s)).concat(data.events || []);
+  loadedRanges.add(`${start}|${end}`);
+}
+
+async function loadThreads() {
+  const data = await fetchApi('/api/google/gmail');
+  if (data.connected === false) { markDisconnected(!!data.reconnect); return; }
+  state.threads = data.threads || [];
+}
+
+async function loadGoogle() {
+  if (DEMO || !state.user || !navigator.onLine) return;
+  try {
+    const s = await fetchApi('/api/google/status');
+    state.googleConnected = s.connected;
+    state.googleEmail = s.email;
+    state.googleScopes = s.scopes || [];
+    if (s.connected) {
+      state.googleReconnect = false;
+      loadedRanges.clear();
+      const ws = mondayOf(today());
+      const jobs = [loadEvents(ws, addDays(ws, 14)), loadThreads()];
+      const sel = state.ui.selectedDate && mondayOf(state.ui.selectedDate);
+      if (sel && (sel < ws || sel >= addDays(ws, 14))) jobs.push(loadEvents(sel, addDays(sel, 7)));
+      const results = await Promise.allSettled(jobs);
+      results.filter((r) => r.status === 'rejected').forEach((r) => console.warn('google load failed', r.reason));
+    } else {
+      markDisconnected(false);
+    }
+  } catch (err) {
+    console.warn('google status failed', err); // keep cached Google data on transient errors
+  }
+  scheduleRender();
+  saveCacheSoon();
+}
+
+async function ensureWeekEvents(weekStart) {
+  if (DEMO || !state.googleConnected || !navigator.onLine) return;
+  const ws = mondayOf(today());
+  if (weekStart >= ws && weekStart < addDays(ws, 14) && loadedRanges.has(`${ws}|${addDays(ws, 14)}`)) return;
+  const key = `${weekStart}|${addDays(weekStart, 7)}`;
+  if (loadedRanges.has(key)) return;
+  loadedRanges.add(key);
+  try { await loadEvents(weekStart, addDays(weekStart, 7)); scheduleRender(); } catch (err) { loadedRanges.delete(key); console.warn(err); }
+}
+
+async function connectGoogle() {
+  if (DEMO) { toast('Demo mode: Google is simulated.'); return; }
+  if (!navigator.onLine) { toast('Connecting Google needs a connection.', { error: true }); return; }
+  try {
+    const { url } = await fetchApi('/api/google/auth');
+    if (!/^https:\/\/accounts\.google\.com\//.test(url)) throw new Error('Unexpected consent URL');
+    location.href = url;
+  } catch (err) {
+    toast(`Couldn’t start Google sign-in: ${err.message}`, { error: true });
+  }
+}
+
+let disconnectArmed = null;
+async function disconnectGoogle(el) {
+  if (!disconnectArmed) {
+    el.textContent = 'Tap again to disconnect';
+    disconnectArmed = setTimeout(() => { disconnectArmed = null; if (el.isConnected) el.textContent = 'Disconnect Google'; }, 3000);
+    return;
+  }
+  clearTimeout(disconnectArmed); disconnectArmed = null;
+  if (DEMO) { markDisconnected(); render(); return; }
+  try {
+    await fetchApi('/api/google/disconnect', { method: 'POST' });
+    markDisconnected(false);
+    state.googleEmail = null;
+    saveCache(); render();
+    toast('Google disconnected.');
+  } catch (err) {
+    toast(`Couldn’t disconnect: ${err.message}`, { error: true });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Event helpers
+// ---------------------------------------------------------------------------
+const evStart = (e) => (e.allDay ? startOfDayInTz(e.start, TZ) : new Date(e.start));
+const evEnd = (e) => (e.allDay ? startOfDayInTz(e.end || addDays(e.start, 1), TZ) : new Date(e.end || e.start));
+function eventsOn(iso) {
+  const s = startOfDayInTz(iso, TZ); const e = startOfDayInTz(addDays(iso, 1), TZ);
+  return state.events.filter((ev) => evStart(ev) < e && evEnd(ev) > s);
+}
+const isWorkEvent = (e) => !!e.primary;
+const isWorkTask = (t) => { const p = projectById(t.project_id); return !!(p && p.business && p.business.trim().toLowerCase() !== 'personal'); };
+
+function eventTimeRange(e, iso) {
+  if (e.allDay) return 'All day';
+  const s = evStart(e); const en = evEnd(e);
+  const sameDayStart = isoDateInTz(s, TZ) === iso;
+  const sameDayEnd = isoDateInTz(en, TZ) === iso;
+  return `${sameDayStart ? fmtInstant(s, TZ) : '…'} – ${sameDayEnd ? fmtInstant(en, TZ) : '…'}`;
+}
+
+function eventLinkBtn(e, cls = 'btn xs lav') {
+  const meet = safeUrl(e.meetUrl || '');
+  const open = safeUrl(e.htmlLink || '');
+  if (meet) return `<a class="${cls}" href="${esc(meet)}" target="_blank" rel="noopener noreferrer">${icon('video', 'xs')} Meet</a>`;
+  if (open) return `<a class="btn xs" href="${esc(open)}" target="_blank" rel="noopener noreferrer">${icon('external', 'xs')} Open</a>`;
+  return '';
+}
+
+function connectCard(compact = false) {
+  const again = state.googleReconnect;
+  return `<section class="card" aria-label="Connect Google">
+    <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px">
+      <span class="row-icon lav">${icon('google')}</span>
+      <div><b>${again ? 'Reconnect Google' : 'Connect Google'}</b>
+        <div class="caption">${again ? 'Google access expired. Reconnect to bring your calendar and inbox back.' : compact ? 'See your events next to your tasks.' : 'See your calendar and the email that needs you, read-only.'}</div></div>
+    </div>
+    <button class="btn dark block" data-action="connect-google">${icon('google', 'sm')} ${again ? 'Reconnect' : 'Connect'} Google</button>
+  </section>`;
+}
+
+// ---------------------------------------------------------------------------
+// Home: Up next + Inbox
+// ---------------------------------------------------------------------------
+function homeUpNext() {
+  if (state.googleConnected === false) return connectCard();
+  if (!state.googleConnected) return '';
+  const now = new Date();
+  const horizon = startOfDayInTz(addDays(today(), 2), TZ);
+  const next = state.events
+    .filter((e) => !e.allDay && evEnd(e) > now && evStart(e) < horizon)
+    .sort((a, b) => evStart(a) - evStart(b))
+    .slice(0, 2);
+  const when = (e) => {
+    const s = evStart(e);
+    if (s <= now) return 'Now';
+    const d = isoDateInTz(s, TZ);
+    return `${d === today() ? '' : 'Tomorrow · '}${fmtInstant(s, TZ)}`;
+  };
+  return `<div class="section-title"><h2>Up next</h2><a class="link-btn" href="#calendar">Calendar</a></div>
+    ${next.length ? `<div class="strip">${next.map((e, i) => `
+      <div class="event-tile${i === 0 ? ' first' : ''}">
+        <span class="t">${esc(when(e))}</span>
+        <span class="n">${esc(e.title)}</span>
+        ${e.location && !safeUrl(e.location) ? `<span class="caption" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(e.location)}</span>` : ''}
+        <div class="actions">${eventLinkBtn(e)}</div>
+      </div>`).join('')}</div>`
+    : '<div class="card empty">Nothing else on the calendar today.</div>'}`;
+}
+
+function homeInbox() {
+  if (!state.googleConnected) return '';
+  const th = state.threads || [];
+  return `<section class="card" style="margin-top:16px" aria-label="Inbox">
+    <div class="card-title"><h2>Inbox</h2><span class="chip ${th.length ? 'dark' : 'muted'}">${th.length} need${th.length === 1 ? 's' : ''} you</span></div>
+    ${th.length ? `<div class="inset-list">${th.slice(0, 3).map((t) => {
+      const url = safeUrl(t.url);
+      return `<a class="row" ${url ? `href="${esc(url)}" target="_blank" rel="noopener noreferrer"` : ''}>
+        <span class="row-icon${t.unread ? ' lav' : ''}">${icon('mail', 'sm')}</span>
+        <span class="row-main"><span class="row-title" style="display:block">${esc(t.from)}</span><span class="row-sub" style="display:block">${esc(t.subject)}</span></span>
+        <span class="row-end caption">${esc(timeAgo(new Date(t.date)))}</span>
+      </a>`;
+    }).join('')}</div>
+    ${th.length > 3 ? `<a class="link-btn" href="https://mail.google.com/mail/u/0/#inbox" target="_blank" rel="noopener noreferrer">+${th.length - 3} more in Gmail</a>` : ''}`
+    : '<div class="empty">The inbox is quiet.</div>'}
+  </section>`;
+}
+
+// ---------------------------------------------------------------------------
+// Calendar
+// ---------------------------------------------------------------------------
+VIEWS.calendar = () => {
+  const sel = state.ui.selectedDate || today();
+  state.ui.selectedDate = sel;
+  const ws = mondayOf(sel);
+  ensureWeekEvents(ws);
+  const f = state.ui.calFilter;
+  const keepEvent = (e) => f === 'all' || (f === 'work' ? isWorkEvent(e) : !isWorkEvent(e));
+  const keepTask = (t) => f === 'all' || (f === 'work' ? isWorkTask(t) : !isWorkTask(t));
+
+  const days = Array.from({ length: 7 }, (_, i) => addDays(ws, i));
+  const week = days.map((d) => {
+    const hasEv = eventsOn(d).some(keepEvent);
+    const hasTask = state.tasks.some((t) => t.due_date === d && t.status !== 'done' && keepTask(t));
+    return `<button class="day${d === today() ? ' today' : ''}${d === sel ? ' sel' : ''}" data-action="select-day" data-value="${d}" aria-pressed="${d === sel}" aria-label="${esc(fmtDate(d, { long: true, weekday: true }))}">
+      <span>${dayShort(d)}</span><span class="num">${Number(d.slice(8))}</span>
+      <span class="marks">${hasEv ? '<i></i>' : ''}${hasTask ? '<i class="t"></i>' : ''}</span>
+    </button>`;
+  }).join('');
+
+  const items = [];
+  const dayStart = startOfDayInTz(sel, TZ);
+  for (const e of eventsOn(sel).filter(keepEvent)) {
+    const min = e.allDay ? null : Math.max(0, Math.round((evStart(e) - dayStart) / 60000));
+    items.push({ kind: 'event', min, e });
+  }
+  for (const t of state.tasks.filter((x) => x.due_date === sel && keepTask(x))) {
+    const min = t.due_time ? Number(t.due_time.slice(0, 2)) * 60 + Number(t.due_time.slice(3, 5)) : null;
+    items.push({ kind: 'task', min, t });
+  }
+  items.sort((a, b) => (a.min ?? -1) - (b.min ?? -1));
+  const nowMin = sel === today() ? nowMinutes() : null;
+  const nextIdx = nowMin === null ? -1 : items.findIndex((it) => it.min !== null && it.min >= nowMin);
+
+  const groups = [
+    ['Anytime', (it) => it.min === null],
+    ['Morning', (it) => it.min !== null && it.min < 720],
+    ['Afternoon', (it) => it.min !== null && it.min >= 720 && it.min < 1020],
+    ['Evening', (it) => it.min !== null && it.min >= 1020],
+  ];
+
+  const itemHTML = (it) => {
+    const isNext = items.indexOf(it) === nextIdx;
+    const [hm, ap] = it.min === null ? [] : fmtMinutes(it.min).split(' ');
+    const time = it.min === null ? '' : `<span class="tl-time">${esc(hm)}<br>${esc(ap)}</span>`;
+    if (it.kind === 'event') {
+      const e = it.e;
+      return `<div class="tl-item${isNext ? ' now' : ''}">${time}
+        <div class="tl-card event${isWorkEvent(e) ? '' : ' personal'}">
+          <div class="title">${esc(e.title)}</div>
+          <div class="sub"><span>${icon('clock', 'xs')}${esc(eventTimeRange(e, sel))}</span>${e.calendarName ? `<span>${esc(e.calendarName)}</span>` : ''}</div>
+          ${e.location && !safeUrl(e.location) ? `<div class="sub"><span>${esc(e.location)}</span></div>` : ''}
+          ${eventLinkBtn(e) ? `<div class="foot"><span></span>${eventLinkBtn(e)}</div>` : ''}
+        </div></div>`;
+    }
+    const t = it.t; const p = projectById(t.project_id);
+    return `<div class="tl-item task${isNext ? ' now' : ''}">${time}
+      <button class="tl-card" data-action="open-task" data-id="${esc(t.id)}">
+        <div class="title"${t.status === 'done' ? ' style="text-decoration:line-through;color:var(--muted)"' : ''}>${esc(t.title)}</div>
+        <div class="foot"><div class="chips">${statusChip(t.status)}${prioChip(t.priority)}</div>${p ? `<span class="caption">${projectDot(p)} ${esc(p.name)}</span>` : ''}</div>
+      </button></div>`;
+  };
+
+  const timeline = groups.map(([label, test]) => {
+    const g = items.filter(test);
+    if (!g.length) return '';
+    return `<section class="tl-group${label === 'Anytime' ? ' anytime' : ''}"><h3 class="tl-group-title">${label}<span class="chip muted">${g.length}</span></h3><div class="tl-items">${g.map(itemHTML).join('')}</div></section>`;
+  }).join('');
+
+  return `${header({
+    title: 'Calendar',
+    actions: `<button class="icon-btn" data-action="new-task" data-date="${esc(sel)}" aria-label="Add task on this day">${icon('plus')}</button>`,
+  })}
+  <div class="week-head">
+    <h2>${esc(monthLabel(sel))}</h2>
+    <div class="week-nav">
+      <button class="icon-btn sm" data-action="week" data-value="-7" aria-label="Previous week">${icon('left', 'sm')}</button>
+      <button class="pill sm" data-action="open-month">${icon('calendar', 'xs')} Calendar</button>
+      <button class="icon-btn sm" data-action="week" data-value="7" aria-label="Next week">${icon('right', 'sm')}</button>
+    </div>
+  </div>
+  <div class="week">${week}</div>
+  ${pillsHTML([{ id: 'all', label: 'All' }, { id: 'work', label: 'Work' }, { id: 'personal', label: 'Personal' }], f, 'cal-filter')}
+  ${state.googleConnected === false ? connectCard(true) : ''}
+  <div class="section-title"><h2>${esc(sel === today() ? 'Today' : fmtDate(sel, { long: true, weekday: true }))}</h2>${sel !== today() ? '<button class="link-btn" data-action="select-day" data-value="today">Back to today</button>' : ''}</div>
+  <div class="timeline">${timeline || `<div class="card empty">${sel === today() ? 'Nothing scheduled. An open day.' : 'Nothing scheduled.'}</div>`}</div>`;
+};
+
+function monthGrid(monthIso) {
+  const first = `${monthIso.slice(0, 7)}-01`;
+  const start = mondayOf(first);
+  const sel = state.ui.selectedDate || today();
+  const cells = Array.from({ length: 42 }, (_, i) => addDays(start, i));
+  const busy = new Set([
+    ...state.tasks.filter((t) => t.due_date && t.status !== 'done').map((t) => t.due_date),
+    ...state.events.map((e) => isoDateInTz(evStart(e), TZ)),
+  ]);
+  return `<div class="week-head">
+      <button class="icon-btn sm" data-action="month-nav" data-value="${addDays(first, -1).slice(0, 7)}-01" aria-label="Previous month">${icon('left', 'sm')}</button>
+      <h2>${esc(monthLabel(first))}</h2>
+      <button class="icon-btn sm" data-action="month-nav" data-value="${addDays(first, 32).slice(0, 7)}-01" aria-label="Next month">${icon('right', 'sm')}</button>
+    </div>
+    <div class="month">
+      ${['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((d) => `<span class="dow">${d}</span>`).join('')}
+      ${cells.map((d) => `<button class="${d.slice(0, 7) !== first.slice(0, 7) ? 'out' : ''}${d === today() ? ' today' : ''}${d === sel ? ' sel' : ''}${busy.has(d) ? ' has' : ''}" data-action="pick-day" data-value="${d}" aria-label="${esc(fmtDate(d, { long: true }))}">${Number(d.slice(8))}</button>`).join('')}
+    </div>
+    <button class="btn block" style="margin-top:14px" data-action="pick-day" data-value="${today()}">Today</button>`;
+}
+
+function openMonthPicker() {
+  openSheet(`${sheetHead('Pick a day')}<div id="month-body">${monthGrid(state.ui.selectedDate || today())}</div>`, { label: 'Pick a day' });
+}
+
+// ---------------------------------------------------------------------------
+// Profile: Google section
+// ---------------------------------------------------------------------------
+function profileGoogle() {
+  let body;
+  if (state.googleConnected) {
+    const scopes = state.googleScopes || [];
+    const missing = scopes.length && ['calendar.readonly', 'gmail.readonly'].filter((s) => !scopes.some((x) => x.endsWith(s)));
+    body = `<div class="settings-row"><span class="k">Connected</span><span class="v">${esc(state.googleEmail || 'Google account')}</span></div>
+      <div class="settings-row"><span class="k">Access</span><span class="v">Calendar + Gmail, read-only</span></div>
+      ${missing && missing.length ? `<p class="form-msg err">Missing permission: ${esc(missing.join(', '))}. Reconnect and allow it.</p>` : ''}
+      <div class="btn-row" style="margin-top:8px">
+        <button class="btn" style="flex:1" data-action="connect-google">${icon('refresh', 'sm')} Reconnect</button>
+        <button class="btn danger" style="flex:1" data-action="disconnect-google">Disconnect Google</button>
+      </div>`;
+  } else if (state.googleConnected === false) {
+    body = `<p class="caption" style="margin:0 0 12px">${state.googleReconnect ? 'Google access expired.' : 'Not connected.'} Daybook reads your calendar and inbox (never sends or edits). Tokens stay on the server.</p>
+      <button class="btn dark block" data-action="connect-google">${icon('google', 'sm')} ${state.googleReconnect ? 'Reconnect' : 'Connect'} Google</button>`;
+  } else {
+    body = `<p class="caption" style="margin:0">${navigator.onLine ? 'Checking…' : 'Offline — status unknown.'}</p>`;
+  }
+  return `<section class="card"><div class="card-title"><h2>Google</h2>${state.googleConnected ? '<span class="chip open">Connected</span>' : ''}</div>${body}</section>`;
+}
+
+// ---------------------------------------------------------------------------
 // Actions (event delegation)
 // ---------------------------------------------------------------------------
 let navDepth = 0;
@@ -1552,6 +1886,14 @@ const ACTIONS = {
     if (el.dataset.value === 'link') form.url.focus();
   },
   'open-file': (el) => openFile(el.dataset.id),
+  'connect-google': () => connectGoogle(),
+  'disconnect-google': (el) => disconnectGoogle(el),
+  'select-day': (el) => { state.ui.selectedDate = el.dataset.value === 'today' ? today() : el.dataset.value; render(); },
+  week: (el) => { state.ui.selectedDate = addDays(state.ui.selectedDate || today(), Number(el.dataset.value)); render(); },
+  'cal-filter': (el) => { state.ui.calFilter = el.dataset.value; render(); },
+  'open-month': () => openMonthPicker(),
+  'month-nav': (el) => { const body = $('#month-body'); if (body) body.innerHTML = monthGrid(el.dataset.value); },
+  'pick-day': (el) => { state.ui.selectedDate = el.dataset.value; closeSheet(); if (parseRoute().view !== 'calendar') go('#calendar'); else render(); },
   'show-briefing': () => {}, // milestone 6
 };
 
@@ -1736,6 +2078,24 @@ function seedDemo() {
     mk({ name: 'Hollis estimate v2.pdf', kind: 'upload', storage_path: 'demo/x/est.pdf', mime: 'application/pdf', size_bytes: 284120, project_id: p2.id }),
     mk({ name: 'Brand moodboard', kind: 'link', url: 'https://www.figma.com/file/abc', project_id: p1.id, tags: ['design'] }),
   ];
+  const at = (iso, hhmm) => { const [h, m] = hhmm.split(':').map(Number); return new Date(startOfDayInTz(iso, TZ).getTime() + (h * 60 + m) * 60000).toISOString(); };
+  const ev = (o) => ({ id: uuid(), allDay: false, primary: true, calendarName: 'Work', htmlLink: 'https://calendar.google.com/', ...o });
+  state.events = [
+    ev({ title: 'Standup with shop crew', start: at(d, '08:30'), end: at(d, '08:45') }),
+    ev({ title: 'Hollis site walk', start: at(d, '11:00'), end: at(d, '12:00'), location: '14 Mill Rd' }),
+    ev({ title: 'Design review', start: at(d, '15:30'), end: at(d, '16:15'), meetUrl: 'https://meet.google.com/abc-defg-hij' }),
+    ev({ title: 'Dinner with family', start: at(d, '18:30'), end: at(d, '20:00'), primary: false, calendarName: 'Family' }),
+    ev({ title: 'Trash day', start: d, end: addDays(d, 1), allDay: true, primary: false, calendarName: 'Home' }),
+    ev({ title: 'Supplier call', start: at(addDays(d, 1), '09:00'), end: at(addDays(d, 1), '09:30') }),
+  ];
+  state.threads = [
+    { threadId: 't1', from: 'Dana Hollis', subject: 'Re: revised estimate', snippet: 'Thanks — can you confirm the gauge?', date: new Date(Date.now() - 3600e3).toISOString(), unread: true, url: 'https://mail.google.com/mail/u/0/#all/t1' },
+    { threadId: 't2', from: 'Acme Steel', subject: 'Order 4471 shipping update', snippet: 'Your order ships Thursday.', date: new Date(Date.now() - 7200e3 * 5).toISOString(), unread: false, url: 'https://mail.google.com/mail/u/0/#all/t2' },
+    { threadId: 't3', from: '<script>x</script>', subject: '<img src=x onerror=alert(1)>', snippet: '', date: new Date(Date.now() - 86400e3).toISOString(), unread: true, url: 'javascript:alert(1)' },
+    { threadId: 't4', from: 'Priya (DuctLink)', subject: 'Pricing page notes', snippet: 'Left a few comments.', date: new Date(Date.now() - 86400e3 * 1.5).toISOString(), unread: true, url: 'https://mail.google.com/mail/u/0/#all/t4' },
+  ];
+  state.googleConnected = true;
+  state.googleEmail = 'demo@gmail.com';
 }
 
 boot();
