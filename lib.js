@@ -35,7 +35,7 @@ function inline(escaped) {
   // escaped text in → HTML out. Links: [text](https://...) — url is already escaped, so quotes are inert.
   let out = escaped.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (m, text, href) => {
     const raw = href.replace(/&amp;/g, '&');
-    if (!/^(https?:\/\/|mailto:)/i.test(raw) || !safeUrl(raw)) return text;
+    if (!/^(https?:\/\/|mailto:)/i.test(raw) || !safeUrl(raw)) return m; // leave unsafe links as plain text
     return `<a href="${href}" target="_blank" rel="noopener noreferrer">${text}</a>`;
   });
   out = out.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');

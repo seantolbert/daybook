@@ -235,7 +235,7 @@ img, svg { display: block; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 
 /* ---------------------------------------------------------------- Task cards */
-.list { display: grid; gap: 10px; }
+.list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
 .swipe-wrap { position: relative; border-radius: var(--radius-sm); }
 .swipe-bg {
   position: absolute; inset: 0; border-radius: var(--radius); background: var(--green-fill);
@@ -524,7 +524,7 @@ input::-webkit-date-and-time-value { text-align: left; }
 .form-msg.ok { background: var(--green-fill); color: var(--green-ink); }
 
 /* Search */
-.search-results { display: grid; gap: 8px; margin-top: 14px; }
+.search-results { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; margin-top: 14px; }
 .search-group { font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 2px; }
 
 /* Pull to refresh */

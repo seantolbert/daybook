@@ -842,12 +842,6 @@ VIEWS.project = ({ id }) => {
   ${body}`;
 };
 
-function projectNotesTab() { return '<div class="card empty">Notes arrive in the next milestone.</div>'; } // milestone 4
-function projectFilesTab() { return '<div class="card empty">Files arrive in the next milestone.</div>'; } // milestone 4
-
-VIEWS.notes = () => header({ title: 'Notes' }) + libraryTabs('notes') + '<div class="card empty">Coming next.</div>';
-VIEWS.files = () => header({ title: 'Files' }) + libraryTabs('files') + '<div class="card empty">Coming next.</div>';
-VIEWS.note = () => header({ title: 'Note', back: '#notes' });
 VIEWS.calendar = () => header({ title: 'Calendar' }) + '<div class="card empty">Your calendar will appear here.</div>';
 
 // ---------------------------------------------------------------------------
@@ -1078,8 +1072,402 @@ async function handleDelete(el) {
   });
 }
 
-async function deleteFile() { /* milestone 4 */ }
-function openSearch() { toast('Search arrives with notes and files.'); } // milestone 4
+
+// ---------------------------------------------------------------------------
+// Notes
+// ---------------------------------------------------------------------------
+function noteTitle(n) {
+  if (n.title?.trim()) return n.title.trim();
+  const first = (n.body || '').split('\n').find((l) => l.trim());
+  return first ? first.replace(/^#+\s*/, '').slice(0, 80) : 'Untitled note';
+}
+const plain = (md) => String(md || '').replace(/[#*_`>\[\]()-]+/g, ' ').replace(/\s+/g, ' ').trim();
+const shortDate = (ts) => (ts ? fmtDate(isoDateInTz(new Date(ts), TZ)) : '');
+
+function sortNotes(list) {
+  return [...list].sort((a, b) => (b.pinned - a.pinned) || (b.updated_at || '').localeCompare(a.updated_at || ''));
+}
+
+function noteMatches(n, q) {
+  if (!q) return true;
+  const hay = `${n.title || ''} ${n.body || ''} ${(n.tags || []).join(' ')}`.toLowerCase();
+  return q.toLowerCase().split(/\s+/).filter(Boolean).every((w) => hay.includes(w.replace(/^#/, '')));
+}
+
+function noteRow(n, { showProject = true } = {}) {
+  const p = projectById(n.project_id);
+  const snippet = plain(n.body).slice(0, 160);
+  return `<a class="row" href="#note/${esc(n.id)}">
+    <span class="row-icon lav">${icon(n.pinned ? 'pin' : 'note')}</span>
+    <span class="row-main">
+      <span class="row-title" style="display:block">${esc(noteTitle(n))}</span>
+      ${snippet ? `<span class="row-snippet">${esc(snippet)}</span>` : ''}
+      <span class="row-sub" style="display:block;margin-top:4px">${esc(shortDate(n.updated_at))}${showProject && p ? ` · ${esc(p.name)}` : ''}${(n.tags || []).length ? ` · ${n.tags.slice(0, 3).map((t) => `#${esc(t)}`).join(' ')}` : ''}</span>
+    </span>
+  </a>`;
+}
+
+function notesList() {
+  const q = state.ui.noteQuery.trim();
+  const list = sortNotes(state.notes.filter((n) => noteMatches(n, q)));
+  if (!list.length) return `<div class="card empty">${q ? 'No notes match that.' : 'No notes yet. Jot something down with +.'}</div>`;
+  return list.map((n) => noteRow(n)).join('');
+}
+
+VIEWS.notes = () => `${header({ title: 'Notes', actions: libraryActions('new-note', 'New note') })}
+  ${libraryTabs('notes')}
+  <div class="input-wrap" style="margin-bottom:14px">${icon('search', 'sm')}
+    <input class="input" type="search" data-input="note-search" placeholder="Search notes and #tags" value="${esc(state.ui.noteQuery)}" aria-label="Search notes" enterkeyhint="search"></div>
+  <div class="list" id="note-results">${notesList()}</div>`;
+
+VIEWS.note = ({ id }) => {
+  const n = findIn('notes', id);
+  if (!n) return header({ title: 'Note', back: '#notes' }) + '<div class="card empty">This note isn’t here anymore.</div>';
+  const p = projectById(n.project_id);
+  return `${header({
+    title: '',
+    back: p ? `#project/${p.id}` : '#notes',
+    actions: `
+      <button class="icon-btn sm${n.pinned ? ' dark' : ''}" data-action="toggle-pin" data-id="${esc(n.id)}" aria-label="${n.pinned ? 'Unpin' : 'Pin'}" aria-pressed="${n.pinned}">${icon('pin', 'sm')}</button>
+      <button class="icon-btn sm" data-action="edit-note" data-id="${esc(n.id)}" aria-label="Edit note">${icon('edit', 'sm')}</button>`,
+  })}
+  <h1 class="detail-title">${esc(noteTitle(n))}</h1>
+  <div class="chips" style="margin-bottom:14px">
+    ${p ? `<a class="chip muted" href="#project/${esc(p.id)}" style="text-decoration:none">${projectDot(p)} ${esc(p.name)}</a>` : ''}
+    ${tagChips(n.tags)}
+    <span class="chip muted">Edited ${esc(shortDate(n.updated_at))}</span>
+  </div>
+  <article class="card md">${n.body?.trim() ? renderMarkdown(n.body) : '<p class="caption">Empty note.</p>'}</article>
+  <button class="btn danger block" data-action="delete" data-table="notes" data-id="${esc(n.id)}">${icon('trash', 'sm')} Delete note</button>`;
+};
+
+function projectNotesTab(p) {
+  const list = sortNotes(state.notes.filter((n) => n.project_id === p.id));
+  return `<div class="section-title"><h2>Notes · ${list.length}</h2><button class="link-btn" data-action="new-note" data-project="${esc(p.id)}">+ Add note</button></div>
+    <div class="list">${list.length ? list.map((n) => noteRow(n, { showProject: false })).join('') : '<div class="card empty">No notes for this project yet.</div>'}</div>`;
+}
+
+function openNoteSheet({ id = null, projectId = null } = {}) {
+  const n = id ? findIn('notes', id) : null;
+  const v = n || { title: '', body: '', project_id: projectId, tags: [], pinned: false };
+  openSheet(`${sheetHead(n ? 'Edit Note' : 'New Note')}
+    <form id="note-form" data-id="${esc(n?.id || '')}" novalidate autocomplete="off">
+      <div class="field"><label for="f-ntitle">Title</label>
+        <input class="input" id="f-ntitle" name="title" maxlength="200" value="${esc(v.title || '')}" placeholder="Title (optional)" autofocus></div>
+      <div class="field">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+          <span class="label">Body</span>
+          <div class="seg" style="width:180px"><button type="button" class="on" data-action="note-mode" data-value="write">Write</button><button type="button" data-action="note-mode" data-value="preview">Preview</button></div>
+        </div>
+        <textarea class="textarea tall" name="body" placeholder="Markdown: # heading, **bold**, - list, [link](https://…)">${esc(v.body || '')}</textarea>
+        <div class="md md-preview" data-preview hidden></div>
+      </div>
+      <div class="field"><label for="f-project_id">Project</label>${projectSelect(v.project_id)}</div>
+      <div class="field"><span class="label">Tags</span>${tagEditor(v.tags)}</div>
+      <input type="hidden" name="pinned" value="${v.pinned ? '1' : ''}">
+      <div class="toggle"><span>Pin to top</span><button type="button" class="switch${v.pinned ? ' on' : ''}" role="switch" aria-checked="${!!v.pinned}" aria-label="Pin to top" data-action="toggle-switch" data-field="pinned"></button></div>
+      <div class="sheet-foot"><button class="btn dark big block" type="submit">${n ? 'Save Changes' : 'Create Note'}</button></div>
+    </form>`, { label: n ? 'Edit note' : 'New note' });
+}
+
+async function submitNote(form) {
+  const title = form.title.value.trim();
+  const body = form.body.value;
+  if (!title && !body.trim()) { toast('Write something first.', { error: true }); form.body.focus(); return; }
+  const fields = {
+    title: title || null,
+    body: body.trim() ? body : null,
+    project_id: form.project_id.value || null,
+    tags: readTags(form),
+    pinned: !!form.pinned.value,
+  };
+  const id = form.dataset.id;
+  closeSheet();
+  if (id) await updateRow('notes', id, fields);
+  else {
+    const row = await createRow('notes', fields);
+    if (row && parseRoute().view !== 'project') go(`#note/${row.id}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Files
+// ---------------------------------------------------------------------------
+function fileIcon(f) {
+  if (f.kind === 'link') return ['link', 'lav'];
+  const m = f.mime || '';
+  if (m === 'application/pdf') return ['pdf', 'red'];
+  if (m.startsWith('image/')) return ['image', 'green'];
+  return ['file', 'amber'];
+}
+
+function fileHost(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
+}
+
+function fileRow(f, { showProject = true } = {}) {
+  const [ic, cls] = fileIcon(f);
+  const p = projectById(f.project_id);
+  const meta = [
+    f.kind === 'link' ? fileHost(f.url) : fmtBytes(f.size_bytes),
+    showProject && p ? p.name : '',
+    shortDate(f.created_at),
+  ].filter(Boolean).join(' · ');
+  return `<div class="row">
+    <span class="row-icon ${cls}">${icon(ic)}</span>
+    <button class="row-main" data-action="open-file" data-id="${esc(f.id)}" style="text-align:left">
+      <span class="row-title" style="display:block">${esc(f.name)}</span>
+      <span class="row-sub" style="display:block">${esc(meta)}</span>
+    </button>
+    <a class="icon-btn sm ghost" href="#file/${esc(f.id)}" aria-label="Details for ${esc(f.name)}">${icon('more', 'sm')}</a>
+  </div>`;
+}
+
+VIEWS.files = () => {
+  const list = [...state.files].sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+  return `${header({ title: 'Files', actions: libraryActions('new-file', 'Add file') })}
+  ${libraryTabs('files')}
+  <div class="list">${list.length ? list.map((f) => fileRow(f)).join('') : '<div class="card empty">No files yet. Upload one or save a link with +.</div>'}</div>`;
+};
+
+VIEWS.file = ({ id }) => {
+  const f = findIn('files', id);
+  if (!f) return header({ title: 'File', back: '#files' }) + '<div class="card empty">This file isn’t here anymore.</div>';
+  const p = projectById(f.project_id);
+  const [ic, cls] = fileIcon(f);
+  return `${header({
+    title: 'File',
+    back: p ? `#project/${p.id}` : '#files',
+    actions: `<button class="icon-btn sm" data-action="edit-file" data-id="${esc(f.id)}" aria-label="Edit file">${icon('edit', 'sm')}</button>`,
+  })}
+  <div style="display:flex;gap:14px;align-items:center;margin:4px 0 16px">
+    <span class="row-icon ${cls}" style="width:56px;height:56px;border-radius:18px">${icon(ic)}</span>
+    <h1 class="detail-title" style="margin:0">${esc(f.name)}</h1>
+  </div>
+  <div class="card"><dl class="kv">
+    <div><dt>Type</dt><dd>${f.kind === 'link' ? 'Link' : esc(f.mime || 'File')}</dd></div>
+    ${f.kind === 'link' ? `<div><dt>URL</dt><dd>${esc(fileHost(f.url))}</dd></div>` : `<div><dt>Size</dt><dd>${esc(fmtBytes(f.size_bytes))}</dd></div>`}
+    <div><dt>Project</dt><dd>${p ? `<a href="#project/${esc(p.id)}">${projectDot(p)} ${esc(p.name)}</a>` : '—'}</dd></div>
+    <div><dt>Tags</dt><dd><div class="chips" style="justify-content:flex-end">${tagChips(f.tags) || '—'}</div></dd></div>
+    <div><dt>Added</dt><dd>${esc(shortDate(f.created_at))}</dd></div>
+  </dl></div>
+  <div class="btn-row" style="margin-bottom:12px">
+    <button class="btn dark" style="flex:1" data-action="open-file" data-id="${esc(f.id)}">${icon('external', 'sm')} Open</button>
+  </div>
+  <button class="btn danger block" data-action="delete" data-table="files" data-id="${esc(f.id)}">${icon('trash', 'sm')} Delete ${f.kind === 'upload' ? 'file' : 'link'}</button>`;
+};
+
+function projectFilesTab(p) {
+  const list = state.files.filter((f) => f.project_id === p.id).sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+  return `<div class="section-title"><h2>Files · ${list.length}</h2><button class="link-btn" data-action="new-file" data-project="${esc(p.id)}">+ Add file</button></div>
+    <div class="list">${list.length ? list.map((f) => fileRow(f, { showProject: false })).join('') : '<div class="card empty">No files for this project yet.</div>'}</div>`;
+}
+
+async function openFile(id) {
+  const f = findIn('files', id);
+  if (!f) return;
+  if (f.kind === 'link') {
+    const url = safeUrl(f.url);
+    if (url) window.open(url, '_blank', 'noopener'); else toast('That link doesn’t look valid.', { error: true });
+    return;
+  }
+  if (DEMO) { toast('Demo mode: uploads aren’t real.'); return; }
+  // Open a window synchronously (popup blockers), then point it at the signed URL.
+  const win = window.open('', '_blank');
+  const { data, error } = await sb.storage.from('files').createSignedUrl(f.storage_path, 3600);
+  if (error || !data?.signedUrl) {
+    win?.close();
+    toast(navigator.onLine ? `Couldn’t open: ${error?.message || 'unknown error'}` : 'Opening files needs a connection.', { error: true });
+    return;
+  }
+  if (win) { win.opener = null; win.location.href = data.signedUrl; } else location.href = data.signedUrl;
+}
+
+const safeFileName = (name) => (String(name || 'file').normalize('NFKD').replace(/[^\w.\-]+/g, '_').replace(/_+/g, '_').slice(-120)) || 'file';
+
+function uploadToStorage(path, file, onProgress) {
+  return new Promise(async (resolve, reject) => {
+    const { data: { session } } = await sb.auth.getSession();
+    if (!session) { reject(new Error('Not signed in')); return; }
+    const xhr = new XMLHttpRequest();
+    const encoded = path.split('/').map(encodeURIComponent).join('/');
+    xhr.open('POST', `${CONFIG.supabaseUrl}/storage/v1/object/files/${encoded}`);
+    xhr.setRequestHeader('Authorization', `Bearer ${session.access_token}`);
+    xhr.setRequestHeader('apikey', CONFIG.supabaseAnonKey);
+    xhr.setRequestHeader('x-upsert', 'false');
+    xhr.setRequestHeader('cache-control', '3600');
+    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve();
+      else {
+        let msg = `Upload failed (${xhr.status})`;
+        try { msg = JSON.parse(xhr.responseText).message || msg; } catch { /* keep default */ }
+        reject(new Error(msg));
+      }
+    };
+    xhr.onerror = () => reject(new Error('Network error during upload'));
+    xhr.send(file);
+  });
+}
+
+function openFileSheet({ id = null, projectId = null } = {}) {
+  const f = id ? findIn('files', id) : null;
+  const mode = f ? f.kind : 'upload';
+  const v = f || { name: '', url: '', project_id: projectId, tags: [] };
+  openSheet(`${sheetHead(f ? 'Edit File' : 'Add File')}
+    <form id="file-form" data-id="${esc(f?.id || '')}" data-mode="${mode}" novalidate autocomplete="off">
+      ${f ? '' : `<div class="seg" style="margin-bottom:16px">
+        <button type="button" class="on" data-action="file-mode" data-value="upload">Upload</button>
+        <button type="button" data-action="file-mode" data-value="link">Paste link</button></div>`}
+      <div data-mode-panel="upload"${mode === 'upload' ? '' : ' hidden'}>
+        ${f ? '' : `<label class="dropzone field" data-dropzone>
+          ${icon('upload')}
+          <span data-file-label><strong>Choose a file</strong> or drop it here</span>
+          <span class="caption">Up to 50 MB</span>
+          <input type="file" name="file" class="sr-only">
+        </label>
+        <div class="progressbar" data-progress hidden><div></div></div>`}
+      </div>
+      <div data-mode-panel="link"${mode === 'link' ? '' : ' hidden'}>
+        <div class="field"><label for="f-url">URL</label>
+          <input class="input" id="f-url" name="url" type="url" inputmode="url" placeholder="https://…" value="${esc(v.url || '')}"></div>
+      </div>
+      <div class="field"><label for="f-fname">Name</label>
+        <input class="input" id="f-fname" name="name" maxlength="200" value="${esc(v.name)}" placeholder="Shown in your list"></div>
+      <div class="field"><label for="f-project_id">Project</label>${projectSelect(v.project_id)}</div>
+      <div class="field"><span class="label">Tags</span>${tagEditor(v.tags)}</div>
+      <div class="sheet-foot"><button class="btn dark big block" type="submit">${f ? 'Save Changes' : 'Add File'}</button></div>
+    </form>`, {
+    label: f ? 'Edit file' : 'Add file',
+    onMount: (sheet) => {
+      const input = $('input[type=file]', sheet);
+      const zone = $('[data-dropzone]', sheet);
+      if (!input || !zone) return;
+      const pickFile = (file) => {
+        if (!file) return;
+        const form = $('#file-form', sheet);
+        form._file = file;
+        $('[data-file-label]', sheet).innerHTML = `<strong>${esc(file.name)}</strong> · ${esc(fmtBytes(file.size))}`;
+        if (!form.name.value.trim()) form.name.value = file.name;
+      };
+      input.addEventListener('change', () => pickFile(input.files[0]));
+      zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('over'); });
+      zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+      zone.addEventListener('drop', (e) => { e.preventDefault(); zone.classList.remove('over'); pickFile(e.dataTransfer.files[0]); });
+    },
+  });
+}
+
+async function submitFile(form) {
+  const id = form.dataset.id;
+  const mode = form.dataset.mode;
+  const common = { project_id: form.project_id.value || null, tags: readTags(form) };
+  const btn = form.querySelector('[type=submit]');
+
+  if (id) { // edit: metadata only (and URL for links)
+    const patch = { ...common, name: form.name.value.trim() || findIn('files', id).name };
+    if (mode === 'link') {
+      const url = safeUrl(form.url.value);
+      if (!url) { toast('Enter a valid http(s) link.', { error: true }); return; }
+      patch.url = url;
+    }
+    closeSheet();
+    await updateRow('files', id, patch);
+    return;
+  }
+
+  if (!navigator.onLine && !DEMO) { toast('Adding files needs a connection.', { error: true }); return; }
+
+  if (mode === 'link') {
+    const url = safeUrl(form.url.value);
+    if (!url || url.startsWith('mailto:')) { toast('Enter a valid http(s) link.', { error: true }); form.url.focus(); return; }
+    closeSheet();
+    await createRow('files', { ...common, kind: 'link', url, name: form.name.value.trim() || fileHost(url) || url });
+    return;
+  }
+
+  const file = form._file;
+  if (!file) { toast('Choose a file to upload.', { error: true }); return; }
+  if (file.size > 50 * 1024 * 1024) { toast('That file is over 50 MB.', { error: true }); return; }
+  const fileId = uuid();
+  const path = `${state.user.id}/${fileId}/${safeFileName(file.name)}`;
+  const bar = $('[data-progress]', form);
+  bar.hidden = false;
+  btn.disabled = true; btn.textContent = 'Uploading…';
+  try {
+    if (DEMO) { for (let i = 1; i <= 10; i++) { bar.firstElementChild.style.width = `${i * 10}%`; await new Promise((r) => setTimeout(r, 60)); } }
+    else await uploadToStorage(path, file, (pct) => { bar.firstElementChild.style.width = `${Math.round(pct * 100)}%`; });
+  } catch (err) {
+    btn.disabled = false; btn.textContent = 'Add File'; bar.hidden = true;
+    toast(err.message, { error: true });
+    return;
+  }
+  closeSheet();
+  const row = await createRow('files', {
+    ...common, id: fileId, kind: 'upload', storage_path: path,
+    name: form.name.value.trim() || file.name, mime: file.type || null, size_bytes: file.size,
+  });
+  if (!row && !DEMO) await sb.storage.from('files').remove([path]); // don't leave an orphaned object
+}
+
+async function deleteFile(row) {
+  if (row.kind === 'upload' && row.storage_path && !DEMO) {
+    if (!navigator.onLine) { toast('Deleting files needs a connection.', { error: true }); return; }
+    const { error } = await sb.storage.from('files').remove([row.storage_path]);
+    if (error) { toast(`Couldn’t delete the stored file: ${error.message}`, { error: true }); return; }
+  }
+  const ok = await deleteRow('files', row.id);
+  if (ok) {
+    if (parseRoute().view === 'file') go('#files');
+    toast(row.kind === 'upload' ? 'File deleted' : 'Link deleted');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Global search (client-side over the loaded cache)
+// ---------------------------------------------------------------------------
+function searchResults(q) {
+  q = q.trim().toLowerCase();
+  if (!q) return '<div class="empty">Search tasks, notes, files and projects.</div>';
+  const words = q.split(/\s+/).map((w) => w.replace(/^#/, ''));
+  const hit = (...fields) => {
+    const hay = fields.flat().filter(Boolean).join(' ').toLowerCase();
+    return words.every((w) => hay.includes(w));
+  };
+  const groups = [
+    ['Tasks', state.tasks.filter((t) => hit(t.title, t.description, t.tags)).slice(0, 8)
+      .map((t) => `<a class="row" href="#task/${esc(t.id)}"><span class="row-icon green">${icon('task')}</span><span class="row-main"><span class="row-title" style="display:block">${esc(t.title)}</span><span class="row-sub" style="display:block">${esc(STATUS_LABEL[t.status])}${t.due_date ? ` · ${esc(fmtDue(t))}` : ''}</span></span></a>`)],
+    ['Notes', sortNotes(state.notes.filter((n) => hit(n.title, n.body, n.tags))).slice(0, 8).map((n) => noteRow(n))],
+    ['Files', state.files.filter((f) => hit(f.name, f.tags, f.url)).slice(0, 8)
+      .map((f) => { const [ic, cls] = fileIcon(f); return `<a class="row" href="#file/${esc(f.id)}"><span class="row-icon ${cls}">${icon(ic)}</span><span class="row-main"><span class="row-title" style="display:block">${esc(f.name)}</span><span class="row-sub" style="display:block">${f.kind === 'link' ? esc(fileHost(f.url)) : esc(fmtBytes(f.size_bytes))}</span></span></a>`; })],
+    ['Projects', state.projects.filter((p) => hit(p.name, p.business, p.description)).slice(0, 8)
+      .map((p) => `<a class="row" href="#project/${esc(p.id)}"><span class="row-icon" style="background:${safeColor(p.color)}22;color:${safeColor(p.color)}">${icon('folder')}</span><span class="row-main"><span class="row-title" style="display:block">${esc(p.name)}</span><span class="row-sub" style="display:block">${esc(p.business || '')}</span></span></a>`)],
+  ].filter(([, rows]) => rows.length);
+  if (!groups.length) return '<div class="empty">Nothing matches that.</div>';
+  return groups.map(([label, rows]) => `<div class="search-group">${label}</div>${rows.join('')}`).join('');
+}
+
+function openSearch() {
+  openSheet(`${sheetHead('Search')}
+    <div class="input-wrap">${icon('search', 'sm')}<input class="input" type="search" data-input="global-search" placeholder="Search everything" aria-label="Search everything" autofocus enterkeyhint="search"></div>
+    <div class="search-results" id="search-results">${searchResults('')}</div>`, {
+    label: 'Search',
+    onMount: (sheet) => setTimeout(() => $('input', sheet)?.focus(), 220),
+  });
+}
+
+document.addEventListener('input', (e) => {
+  const kind = e.target.dataset?.input;
+  if (kind === 'note-search') {
+    state.ui.noteQuery = e.target.value;
+    const box = $('#note-results');
+    if (box) box.innerHTML = notesList();
+  } else if (kind === 'global-search') {
+    const box = $('#search-results');
+    if (box) box.innerHTML = searchResults(e.target.value);
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Actions (event delegation)
@@ -1135,6 +1523,35 @@ const ACTIONS = {
   'add-tag': (el) => openTagInput(el),
   'remove-tag': (el) => el.closest('[data-tag]').remove(),
   delete: (el) => handleDelete(el),
+  'new-note': (el) => openNoteSheet({ projectId: el.dataset.project || (parseRoute().view === 'project' ? parseRoute().id : null) }),
+  'edit-note': (el) => openNoteSheet({ id: el.dataset.id }),
+  'toggle-pin': (el) => { const n = findIn('notes', el.dataset.id); if (n) updateRow('notes', n.id, { pinned: !n.pinned }); },
+  'note-mode': (el) => {
+    const form = el.closest('form');
+    const preview = el.dataset.value === 'preview';
+    $$('[data-action=note-mode]', form).forEach((b) => b.classList.toggle('on', b === el));
+    const pane = $('[data-preview]', form);
+    pane.innerHTML = renderMarkdown(form.body.value) || '<p class="caption">Nothing to preview.</p>';
+    pane.hidden = !preview;
+    form.body.hidden = preview;
+  },
+  'toggle-switch': (el) => {
+    const form = el.closest('form');
+    const on = !el.classList.contains('on');
+    el.classList.toggle('on', on);
+    el.setAttribute('aria-checked', on);
+    form[el.dataset.field].value = on ? '1' : '';
+  },
+  'new-file': (el) => openFileSheet({ projectId: el.dataset.project || (parseRoute().view === 'project' ? parseRoute().id : null) }),
+  'edit-file': (el) => openFileSheet({ id: el.dataset.id }),
+  'file-mode': (el) => {
+    const form = el.closest('form');
+    form.dataset.mode = el.dataset.value;
+    $$('[data-action=file-mode]', form).forEach((b) => b.classList.toggle('on', b === el));
+    $$('[data-mode-panel]', form).forEach((p) => { p.hidden = p.dataset.modePanel !== el.dataset.value; });
+    if (el.dataset.value === 'link') form.url.focus();
+  },
+  'open-file': (el) => openFile(el.dataset.id),
   'show-briefing': () => {}, // milestone 6
 };
 
@@ -1160,6 +1577,8 @@ const FORMS = {
   'login-form': handleLogin,
   'task-form': submitTask,
   'project-form': submitProject,
+  'note-form': submitNote,
+  'file-form': submitFile,
 };
 document.addEventListener('submit', (e) => {
   const fn = FORMS[e.target.id];
@@ -1307,6 +1726,15 @@ function seedDemo() {
     mk({ title: 'Review DuctLink pricing page', priority: 'medium', status: 'done', due_date: d, completed_at: nowIso(), project_id: p1.id }),
     mk({ title: 'Call about shop insurance', priority: 'medium', status: 'todo', due_date: addDays(d, 1), due_time: '14:30', project_id: p2.id }),
     mk({ title: '<img src=x onerror=alert(1)> escaping check', priority: 'low', status: 'todo', tags: ['test'] }),
+  ];
+  state.notes = [
+    mk({ title: 'Case study structure', body: '## Outline\n- Problem\n- **Process**\n- Result\n\nSee [the brief](https://example.com).', pinned: true, project_id: p1.id, tags: ['writing'] }),
+    mk({ title: '', body: 'Gauge table for the quoting tool: 16ga, 18ga, 20ga, 22ga.', project_id: p2.id }),
+    mk({ title: '<script>alert(1)</script>', body: '[bad](javascript:alert(1)) and <b>raw</b>', tags: ['test'] }),
+  ];
+  state.files = [
+    mk({ name: 'Hollis estimate v2.pdf', kind: 'upload', storage_path: 'demo/x/est.pdf', mime: 'application/pdf', size_bytes: 284120, project_id: p2.id }),
+    mk({ name: 'Brand moodboard', kind: 'link', url: 'https://www.figma.com/file/abc', project_id: p1.id, tags: ['design'] }),
   ];
 }
 
