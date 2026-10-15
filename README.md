@@ -106,6 +106,14 @@ On the **Hobby** plan, Vercel only guarantees the job fires sometime within that
 
 If the Claude call fails, the route still writes a plain briefing ("3 events, 4 tasks due" plus lists built from the data), so Home never comes up empty.
 
+## Things worth knowing
+
+- **Connecting Google from the installed iPhone app:** iOS sometimes finishes the Google sign-in in Safari instead of returning to the home-screen app. That's fine, because the tokens are stored on the server. Close Safari, reopen Daybook, and Profile will show Google as connected.
+- **Which calendars show up:** your primary calendar plus any calendar that's checked (visible) in Google Calendar's sidebar. "Work" in the Calendar filter means primary-calendar events and tasks whose project business isn't "Personal". Everything else counts as "Personal".
+- **Briefing source:** `briefings.stats.source` is `claude` or `fallback`. Home labels a fallback as "basic summary", and Profile shows a "Basic" chip.
+- **Updates:** after a deploy, the installed app picks up the new version the next time it comes to the foreground and shows "Update available — Reload".
+- **Offline:** tasks and notes can be created, edited and completed offline and sync in order when you're back online. Projects, files and Google data need a connection.
+
 ## Local development
 
 ```sh
@@ -116,7 +124,9 @@ npx vercel dev               # http://localhost:3000, serves static + /api
 
 For the Google redirect to work locally, set `GOOGLE_REDIRECT_URI=http://localhost:3000/api/google/callback` and `APP_URL=http://localhost:3000` in `.env.local`.
 
-`npm test` runs the small Node unit tests (markdown escaping, day-shape classification, fallback briefing).
+`npm test` runs the Node unit tests (escaping and the markdown renderer, time-zone math, day-shape classification, the fallback briefing, prompt data wrapping).
+
+**UI preview without any backend:** `python3 -m http.server 5173` (or any static server), then open <http://localhost:5173/?demo>. Demo mode only turns on for `localhost` / `127.0.0.1` with `?demo`. It uses sample data and never touches the network.
 
 ## Security notes
 
@@ -132,8 +142,9 @@ For the Google redirect to work locally, set `GOOGLE_REDIRECT_URI=http://localho
 index.html            app shell + config block
 styles.css / app.js   split out of index.html per the spec's size rule
 manifest.webmanifest, sw.js, icons/
-api/_lib/             supabase.js (service client, verifyUser), google.js, briefing.js helpers
-api/google/           auth, callback, calendar, gmail, status, disconnect
+api/_lib/             supabase.js (service client, verifyUser), google.js, briefing.js (pure helpers)
+lib.js                pure helpers shared by the page, the API and the tests
+api/google/           auth, callback, calendar, gmail, status, disconnect (spec addition: revoke + delete tokens)
 api/cron/briefing.js  scheduled + on-demand briefing
 supabase/schema.sql
 ```

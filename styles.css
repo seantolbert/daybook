@@ -566,3 +566,10 @@ input::-webkit-date-and-time-value { text-align: left; }
 .tl-group.anytime .tl-items { padding-left: 28px; }
 .tl-group.anytime .tl-items::before { left: 16px; }
 .tl-card .foot { flex-wrap: wrap; }
+
+/* Polish */
+.card-title + .settings-row { border-top: 0; }
+.kv a, .row a, a.row { text-decoration: none; }
+.kv a { color: var(--lav-ink); font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
+.task-card:active, .project-card:active, .tl-card:active, a.row:active { transform: scale(.985); }
+.row, .project-card { transition: transform var(--dur) var(--ease), box-shadow var(--dur); }
