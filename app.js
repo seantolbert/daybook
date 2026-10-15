@@ -447,7 +447,7 @@ async function persist(op, rollback) {
       return true;
     }
     rollback(); scheduleRender();
-    toast(`Couldn’t save: ${err.message}`, { error: true });
+    toast(isNetworkError(err) ? 'Couldn’t reach the server — that change needs a connection.' : `Couldn’t save: ${err.message}`, { error: true });
     return false;
   }
 }
@@ -916,7 +916,42 @@ async function regenerateBriefing(el) {
   }
   render();
 }
-function profileInstall() { return ''; } // milestone 7
+// ---------------------------------------------------------------------------
+// PWA: install hint, service worker, update toast
+// ---------------------------------------------------------------------------
+let deferredInstall = null;
+window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); deferredInstall = e; scheduleRender(); });
+window.addEventListener('appinstalled', () => { deferredInstall = null; scheduleRender(); });
+
+const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+function profileInstall() {
+  if (isStandalone()) return '';
+  let how;
+  if (deferredInstall) how = `<button class="btn dark block" data-action="install">${icon('download', 'sm')} Install Daybook</button>`;
+  else if (isIOS()) how = '<p class="caption" style="margin:0">In Safari, tap <b>Share</b> then <b>Add to Home Screen</b>.</p>';
+  else how = '<p class="caption" style="margin:0">Use the install icon in the address bar, or the browser menu → <b>Install Daybook</b>.</p>';
+  return `<section class="card"><div class="card-title"><h2>Install</h2></div>
+    <p style="margin:0 0 10px">Add Daybook to your home screen so it opens like an app and works offline.</p>${how}</section>`;
+}
+
+function registerServiceWorker() {
+  if (!('serviceWorker' in navigator) || DEMO) return;
+  const hadController = !!navigator.serviceWorker.controller;
+  let shown = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || shown) return;
+    shown = true;
+    toast('Update available', { action: 'Reload', onAction: () => location.reload(), ms: 0 });
+  });
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').then((reg) => {
+      // check for a new deploy whenever the app comes back to the foreground
+      document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => {}); });
+    }).catch((err) => console.warn('service worker registration failed', err));
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Form fragments: tags editor, priority pills, project select
@@ -1878,6 +1913,7 @@ const ACTIONS = {
   'sign-out': async () => {
     unsubscribeRealtime();
     clearLocal();
+    navigator.serviceWorker?.controller?.postMessage('clear-data');
     if (DEMO) { location.href = '/'; return; }
     await sb.auth.signOut();
   },
@@ -1967,6 +2003,13 @@ const ACTIONS = {
     render();
   },
   regenerate: (el) => regenerateBriefing(el),
+  install: async () => {
+    if (!deferredInstall) return;
+    deferredInstall.prompt();
+    await deferredInstall.userChoice.catch(() => null);
+    deferredInstall = null;
+    render();
+  },
 };
 
 document.addEventListener('click', (e) => {
@@ -2100,6 +2143,7 @@ async function boot() {
   sb.auth.onAuthStateChange((event, sess) => {
     if (event === 'SIGNED_OUT') {
       unsubscribeRealtime(); clearLocal(); state.user = null; render();
+      navigator.serviceWorker?.controller?.postMessage('clear-data');
     } else if (sess?.user && sess.user.id !== state.user?.id) {
       onSignedIn(sess.user);
     } else if (sess?.user) {
@@ -2176,4 +2220,5 @@ function seedDemo() {
   };
 }
 
+registerServiceWorker();
 boot();
